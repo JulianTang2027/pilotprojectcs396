@@ -44,6 +44,10 @@ def install_dependencies():
 
 def download_data():
     import urllib.request
+    import ssl
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
     urls = [
         "https://www.csie.ntu.edu.tw/~b10902031/gsm8k_train.jsonl",
         "https://www.csie.ntu.edu.tw/~b10902031/gsm8k_train_self-instruct.jsonl",
@@ -55,7 +59,9 @@ def download_data():
         name = url.split('/')[-1]
         if not os.path.exists(name):
             print(f"Downloading {name}...")
-            urllib.request.urlretrieve(url, name)
+            with urllib.request.urlopen(url, context=ssl_ctx) as resp:
+                with open(name, 'wb') as f:
+                    f.write(resp.read())
 
 # --- 3. Utilities ---
 def load_jsonlines(file_name):
