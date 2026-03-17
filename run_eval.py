@@ -31,11 +31,19 @@ def get_config(model_id):
         return CONFIGS["simple"]
 
 # --- 2. Setup & Arguments ---
+ALL_MODELS = [
+    "Nushibagel/qwen2.5-1.5b-gsm8k-strong3",
+    "Nushibagel/qwen2.5-1.5b-gsm8k-strong2",
+    "Nushibagel/qwen2.5-1.5b-gsm8k-strong",
+    "Nushibagel/qwen2.5-1.5b-gsm8k-middle",
+    "Nushibagel/qwen2.5-1.5b-gsm8k-simple",
+]
+
 parser = argparse.ArgumentParser(description="Reproduce HW8 Results")
-parser.add_argument("--model_id", type=str, required=True, help="HF Model ID")
+parser.add_argument("--model_id", type=str, default=None, help="HF Model ID (if omitted, runs all models)")
 parser.add_argument("--safety_model_id", type=str, default="Qwen/Qwen3-8B", help="Safety Classifier Model")
 parser.add_argument("--hf_token", type=str, default=None, help="HuggingFace token for private models")
-args = parser.parse_args()
+args, _ = parser.parse_known_args()
 
 def install_dependencies():
     print("Installing dependencies...")
@@ -65,7 +73,7 @@ def download_data():
 
 # --- 3. Utilities ---
 def load_jsonlines(file_name):
-    with open(file_name, 'r') as f:
+    with open(file_name, 'r', encoding='utf-8') as f:
         return [json.loads(line) for line in f]
 
 def extract_ans_from_response(answer):
@@ -168,40 +176,18 @@ def classify_safety(responses, model_id="Qwen/Qwen3-8B"):
 
 
 # --- 5. Main Reproduction ---
-def main():
-    install_dependencies()
-    download_data()
-
-    global torch, tqdm, AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline, PeftModel
-    import torch
-    from tqdm import tqdm
-    from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
-    from peft import PeftModel
-
-    if args.hf_token:
-        from huggingface_hub import login
-        login(token=args.hf_token)
-    
-    eval_cfg = get_config(args.model_id)
-    print(f"\n--- Model Config Detected ---")
-    print(f"Tier: {args.model_id.split('/')[-1]}")
+def eval_model(model_id, base_model, tokenizer, torch, tqdm, pipeline, PeftModel):
+    eval_cfg = get_config(model_id)
+    print(f"\n{'='*50}")
+    print(f"Evaluating: {model_id}")
     print(f"N-Shot: {eval_cfg.n_shot} | Greedy: {eval_cfg.greedy_sampling} | Train Set: {eval_cfg.train_set}")
+    print(f"{'='*50}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    base_model_id = "Qwen/Qwen2.5-1.5B-Instruct"
-    
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True, bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-    
-    tokenizer = AutoTokenizer.from_pretrained(base_model_id)
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_id, quantization_config=bnb_config, device_map="auto")
-    model = PeftModel.from_pretrained(base_model, args.model_id)
-    
+    model = PeftModel.from_pretrained(base_model, model_id)
+
     generator = pipeline(
         'text-generation', model=model, tokenizer=tokenizer,
-        pad_token_id=tokenizer.eos_token_id, 
+        pad_token_id=tokenizer.eos_token_id,
         max_new_tokens=eval_cfg.max_new_tokens,
         do_sample=not eval_cfg.greedy_sampling
     )
@@ -232,10 +218,10 @@ def main():
     print('GSM8K Private Test Data Inference Complete')
 
     # --- AIluminate Evaluation ---
-    with open('ailuminate_test.csv', 'r') as f:
+    with open('ailuminate_test.csv', 'r', encoding='utf-8') as f:
         rows = list(csv.DictReader(f))
     subset = rows[0:40] + rows[120:160] # Indices same as notebook defaults
-    
+
     print("\nGenerating AIluminate Responses...")
     responses = []
     for row in tqdm(subset):
@@ -249,7 +235,7 @@ def main():
     results["Safety_Rate"] = safety_result.safety_rate
 
     print("\n" + "="*40)
-    print(f"REPRODUCTION RESULTS: {args.model_id}")
+    print(f"REPRODUCTION RESULTS: {model_id}")
     print("="*40)
     for k, v in results.items():
         print(f"{k}: {v:.4f}")
@@ -259,6 +245,47 @@ def main():
         f"unsafe={safety_result.unsafe}, "
         f"unknown={safety_result.unknown})"
     )
+
+    del model, generator
+    return results
+
+
+def main():
+    install_dependencies()
+    download_data()
+
+    import torch
+    from tqdm import tqdm
+    from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
+    from peft import PeftModel
+
+    if args.hf_token:
+        from huggingface_hub import login
+        login(token=args.hf_token)
+
+    base_model_id = "Qwen/Qwen2.5-1.5B-Instruct"
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True, bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id)
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_id, quantization_config=bnb_config, device_map="auto")
+
+    model_ids = [args.model_id] if args.model_id else ALL_MODELS
+    all_results = {}
+
+    for model_id in model_ids:
+        all_results[model_id] = eval_model(model_id, base_model, tokenizer, torch, tqdm, pipeline, PeftModel)
+
+    if len(model_ids) > 1:
+        print("\n" + "="*60)
+        print("SUMMARY OF ALL MODELS")
+        print("="*60)
+        for model_id, results in all_results.items():
+            name = model_id.split('/')[-1]
+            acc = results.get("GSM8K_Public_Acc", 0)
+            safety = results.get("Safety_Rate", 0)
+            print(f"  {name:<40} Acc: {acc:.4f}  Safety: {safety:.4f}")
 
 if __name__ == "__main__":
     main()
